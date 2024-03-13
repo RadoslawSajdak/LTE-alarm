@@ -30,6 +30,7 @@
 #define POS_UNAVAILABLE_MSG         "Position unavailable..."
 #define UNLOCK_MSG                  "drive"
 #define POSITION_MSG                "position"
+#define LOCK_MSG                    "lock"
 
 #define PIN_TX                      7
 #define PIN_RX                      8
@@ -56,6 +57,7 @@ typedef union
         uint8_t ignition_detected   :1;
         uint8_t got_sms_msg         :1;
         uint8_t got_sms_pos         :1;
+
         uint8_t got_sms_unlock      :1;
         uint8_t sms_sent            :1;
         uint8_t lock                :1;
@@ -92,12 +94,18 @@ static app_events_t                 app_events = {.val = 0};
 static bool                         acc_int_event = false;
 static bool                         lte_on = false;
 static char                         sms_rcv_msg[MAX_MSG_LEN] = {0};
-
+static bool                         car_unlocked = false;
 /* ============================================================================================== */
 /*                                        PUBLIC FUNCTIONS                                        */
 void setup() {
     int err;
     Serial.begin(115200);
+    pinMode(PUMP_RELAY_PIN, OUTPUT);
+    pinMode(ALARM_RELAY_PIN, OUTPUT);
+    pinMode(IGNITION_RELAY_PIN, OUTPUT);
+    pinMode(BUTTON_0_PIN, INPUT_PULLUP);
+    pinMode(BUTTON_1_PIN, INPUT_PULLUP);
+
     sim7000_init();
     
     log("Started accel init\n");
@@ -109,8 +117,7 @@ void setup() {
     }
 
     ignition_sense_init();
-    pinMode(BUTTON_0_PIN, INPUT_PULLUP);
-    pinMode(BUTTON_1_PIN, INPUT_PULLUP);
+
 
     log("Everything is configured... Starting app...\n");
     app_events.val = 0;
@@ -138,14 +145,14 @@ void loop()
         {
             alarm_cb();
             if (!app_events.sms_sent)
-                send_sms(TRIG_BY_IGNITION_MSG);            
+            {
+                // if (!lte_on) //TODO: Remove if you don't shutting down the lte
+                //     sim7000_init();
+                send_sms(TRIG_BY_IGNITION_MSG);
+            }           
         }
         if (!digitalRead(BUTTON_0_PIN))
-        {
-            // unlock_the_car(); TODO: Uncomment and update logic
-        }
-        if (!digitalRead(BUTTON_1_PIN))
-            ;//TODO: Unused. Instructions are not clear.
+            unlock_the_car();
         if (app_events.got_sms_msg)
             ;//Handled with lte_on
         if (app_events.got_sms_pos)
@@ -154,16 +161,22 @@ void loop()
             unlock_the_car();
         if (lte_on)
             read_sms();
-        if (app_events.lock)
+        if (app_events.lock) //TODO: Additional if - eg. when alarm was not triggered
             lock_the_car();
-        
     }
-    else
+    else if (!car_unlocked)
     {
         log("Going to sleep...\n");
         delay(2000); //Needed for logs :)
         LowPower.powerDown(SLEEP_FOREVER, ADC_OFF, BOD_OFF); 
         log("Woke up!\n");
+    }
+    else
+    {
+        if (!digitalRead(BUTTON_1_PIN))
+            lock_the_car();
+        if (lte_on)
+            read_sms();
     }
 
 
@@ -258,8 +271,10 @@ static void unlock_the_car(void)
     accel_power(false);
     digitalWrite(PUMP_RELAY_PIN, HIGH);
     digitalWrite(IGNITION_RELAY_PIN, HIGH);
+    digitalWrite(ALARM_RELAY_PIN, LOW);
     //sim7000_shutdown(); //TODO: Decide if you really needs it. It lowers power consumption but wakeup time is ~15s
     app_events.val = 0;
+    car_unlocked = true;
 }
 
 static void lock_the_car(void)
@@ -269,6 +284,7 @@ static void lock_the_car(void)
     digitalWrite(IGNITION_RELAY_PIN, LOW);
     // sim7000_init(); //TODO: Decide if you really needs it. It lowers power consumption but wakeup time is ~15s
     app_events.val = 0;
+    car_unlocked = false;
 }
 
 static void alarm_cb(void)
@@ -277,6 +293,7 @@ static void alarm_cb(void)
     unsigned long current_milis = millis();
     if (current_milis - previous_millis >= ALARM_INTERVAL_MS)
     {
+        log ("Alarm cb\n");
         int state = digitalRead(ALARM_RELAY_PIN);
         digitalWrite(ALARM_RELAY_PIN, !state);
         previous_millis = current_milis;
@@ -372,6 +389,10 @@ static int read_sms(void)
                     app_events.got_sms_pos = 1;
                     log("Position msg\n");
                 }
+                if (0 == strncmp(LOCK_MSG, command, strlen(LOCK_MSG)))
+                {
+                    app_events.lock = 1;
+                }
                 log(command);
             }
             log(sms_rcv_msg);
@@ -389,6 +410,7 @@ static void accel_handler(void)
     {
         log("Motion detected\n");
         send_sms("Motion Detected!");
+        app_events.motion_detected = 1;
     }
 }
 
@@ -406,14 +428,12 @@ static void ignition_sense_handler(void)
         int state = !digitalRead(IGNITION_INT_PIN);
         if (state)
         {
-            app_events.ignition_detected;
-            if (!lte_on) //TODO: Remove if you don't shutting down the lte
-                sim7000_init();
-            send_sms(TRIG_BY_IGNITION_MSG);
+            app_events.ignition_detected = 1;
         }
         else
         {
-            app_events.lock = true;
+            // app_events.lock = true; //todo: I thought about reenable the system when you turn off
+            // ignition
         }
 
         previous_millis = current_milis;
@@ -424,7 +444,8 @@ static void ignition_sense_handler(void)
 static int ignition_sense_init(void)
 {
     pinMode(IGNITION_INT_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(IGNITION_INT_PIN), ignition_sense_cb, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(IGNITION_INT_PIN), ignition_sense_cb, CHANGE); //TODO: Disable INT while the car is unlocked. May
+    // Cause unwanted alarm trigger
     return 0;
 }
 
