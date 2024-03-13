@@ -27,8 +27,9 @@
 #define HELLO_MESSAGE               "JeepProtect just woke up!"
 #define TRIG_BY_ACCEL_MSG           "Jeep is moving!"
 #define TRIG_BY_IGNITION_MSG        "Somebody tried to start the Jeep!"
-#define UNLOCK_MSG                  "Drive"
-#define POSITION_MSG                "Position"
+#define POS_UNAVAILABLE_MSG         "Position unavailable..."
+#define UNLOCK_MSG                  "drive"
+#define POSITION_MSG                "position"
 
 #define PIN_TX                      7
 #define PIN_RX                      8
@@ -42,9 +43,10 @@
 
 #define ACCEL_DATARATE              ADXL345_DATARATE_200_HZ //More is more precisious but takes more energy
 #define ACTIVITY_THRESHOLD          100
-#define MAX_MSG_LEN                 32
+#define MAX_MSG_LEN                 256
 #define ALARM_INTERVAL_MS           1000
 #define IGNITION_DEBOUNCE_MS        5000 //After this time we start accel again or fire an alarm
+#define SMS_CHECK_PERIOD_MS         1000
 
 typedef union
 {
@@ -57,7 +59,7 @@ typedef union
         uint8_t got_sms_unlock      :1;
         uint8_t sms_sent            :1;
         uint8_t lock                :1;
-        uint8_t unused              :1;
+        uint8_t ignition_event      :1;
     };
     uint8_t val;
     
@@ -75,7 +77,10 @@ static void     lock_the_car(void);
 static void     ignition_sense_handler(void);
 static int      ignition_sense_init(void);
 static void     ignition_sense_cb(void);
+static int      sim7000_init(void);
+static int      sim7000_send_position(void);
 static int      send_sms(char *msg);
+static int      read_sms(void);
 static void     log(char *msg);
 static void     log(int msg);
 /* ============================================================================================== */
@@ -85,10 +90,7 @@ static DFRobot_SIM7000              sim7000(&mySerial);
 static Adafruit_ADXL345_Unified     accel(2137);
 static app_events_t                 app_events = {.val = 0};
 static bool                         acc_int_event = false;
-static bool                         ignition_event = false;
-static bool                         button_0_pressed = false;
-static bool                         button_1_pressed = false;
-static bool                         movement_detected = false;
+static bool                         lte_on = false;
 static char                         sms_rcv_msg[MAX_MSG_LEN] = {0};
 
 /* ============================================================================================== */
@@ -96,31 +98,8 @@ static char                         sms_rcv_msg[MAX_MSG_LEN] = {0};
 void setup() {
     int err;
     Serial.begin(115200);
-    mySerial.begin(19200);
-    log("Turn ON SIM7000...\n");
-    err = !sim7000.turnON();
-    if(err)
-    {
-        log("Can't turn on SIM module\n");
-        while(1);
-    }
-
-    log("Set baud rate for SIM...");
-    err = !sim7000.setBaudRate(19200);
-    if(err)
-    {
-        log("Failed to set baud rate\n");
-        while(1);
-    }
+    sim7000_init();
     
-    log("Sending init message\n");
-    err = send_sms(HELLO_MESSAGE);
-    if(err)
-    {
-        log("Can't send hello message!!!\n");
-        log(err);
-        while(1);
-    }
     log("Started accel init\n");
     err = accel_init();
     if (err)
@@ -134,6 +113,7 @@ void setup() {
     pinMode(BUTTON_1_PIN, INPUT_PULLUP);
 
     log("Everything is configured... Starting app...\n");
+    app_events.val = 0;
 }
 
 void loop()
@@ -143,12 +123,11 @@ void loop()
     if (acc_int_event)
         accel_handler();
 
-    if (ignition_event)
-        ignition_sense_handler();
-
     // Any event detected and should be handled
     if (app_events.val > 0)
     {
+        if (app_events.ignition_event)
+            ignition_sense_handler();
         if (app_events.motion_detected)
         {
             alarm_cb();
@@ -163,16 +142,18 @@ void loop()
         }
         if (!digitalRead(BUTTON_0_PIN))
         {
-            unlock_the_car();
+            // unlock_the_car(); TODO: Uncomment and update logic
         }
         if (!digitalRead(BUTTON_1_PIN))
             ;//TODO: Unused. Instructions are not clear.
         if (app_events.got_sms_msg)
-            ;//TODO: Read SMS
+            ;//Handled with lte_on
         if (app_events.got_sms_pos)
-            ;//TODO: Get position
+            sim7000_send_position();
         if (app_events.got_sms_unlock)
-            ;//TODO: Disable alarms
+            unlock_the_car();
+        if (lte_on)
+            read_sms();
         if (app_events.lock)
             lock_the_car();
         
@@ -203,11 +184,81 @@ static void log(int msg)
 #endif
 }
 
+static int sim7000_init(void)
+{
+    int err;
+    mySerial.begin(19200);
+    log("Turn ON SIM7000...\n");
+    err = !sim7000.turnON();
+    if(err)
+    {
+        log("Can't turn on SIM module\n");
+        while(1);
+    }
+
+    log("Set baud rate for SIM...");
+    err = !sim7000.setBaudRate(19200);
+    if(err)
+    {
+        log("Failed to set baud rate\n");
+        while(1);
+    }
+
+    err = !sim7000.initPos();
+    if (err)
+    {
+        log("Can't Init gps module\n");
+        while(1);
+    }
+
+    err = !sim7000.checkSendCmd("AT+CMGD=4\r", "OK", 15000);
+    if (err)
+    {
+        log("Can't wipe SMS memory\n");
+        while(1);
+    }
+    
+    log("Sending init message\n");
+    err = send_sms(HELLO_MESSAGE);
+    if(err)
+    {
+        log("Can't send hello message!!!\n");
+        log(err);
+        while(1);
+    }
+
+    lte_on = true;
+}
+
+static int sim7000_send_position(void)
+{
+    char loc[17] = {0};
+    if (sim7000.getPosition())
+    {
+        //TODO: Any better format here
+        memcpy(loc, sim7000.getLatitude(), 8);
+        memcpy(loc+8, sim7000.getLongitude(), 8);
+        send_sms(loc);
+    }
+    else
+        send_sms(POS_UNAVAILABLE_MSG);
+    
+    app_events.got_sms_pos = 0;
+}
+
+static int sim7000_shutdown(void)
+{
+    if (sim7000.turnOFF())
+        lte_on = false;
+    return 0;
+}
+
 static void unlock_the_car(void)
 {
     accel_power(false);
     digitalWrite(PUMP_RELAY_PIN, HIGH);
     digitalWrite(IGNITION_RELAY_PIN, HIGH);
+    //sim7000_shutdown(); //TODO: Decide if you really needs it. It lowers power consumption but wakeup time is ~15s
     app_events.val = 0;
 }
 
@@ -216,6 +267,7 @@ static void lock_the_car(void)
     accel_power(true);
     digitalWrite(PUMP_RELAY_PIN, LOW);
     digitalWrite(IGNITION_RELAY_PIN, LOW);
+    // sim7000_init(); //TODO: Decide if you really needs it. It lowers power consumption but wakeup time is ~15s
     app_events.val = 0;
 }
 
@@ -227,6 +279,7 @@ static void alarm_cb(void)
     {
         int state = digitalRead(ALARM_RELAY_PIN);
         digitalWrite(ALARM_RELAY_PIN, !state);
+        previous_millis = current_milis;
     }
 }
 
@@ -263,7 +316,6 @@ static int accel_init(void)
 
 static int send_sms(char *msg)
 {
-    return 0;
     Serial.print("Sending >> "); Serial.print(msg); Serial.println(" << To: " TARGET_NUMBER);
     if(sim7000.checkSendCmd("AT+CMGF=1\r\n","OK"))
         delay(100);
@@ -285,6 +337,47 @@ static int send_sms(char *msg)
     sim7000.sendCmd("");
     app_events.sms_sent = 1;
     return 0;
+}
+static int read_sms(void)
+{
+    static unsigned long previous_millis = 0;
+    unsigned long current_milis = millis();
+    if (current_milis - previous_millis >= SMS_CHECK_PERIOD_MS)
+    {
+        int len = 0;
+        char *command = NULL;
+
+        // log("Receiving...\n");
+        if (sim7000.checkReadable() > sizeof("+CMG"))//, "+CMGL:"))
+        {
+            len= sim7000.readBuffer(sms_rcv_msg, sizeof(sms_rcv_msg));
+            log("GOT: ");
+            log(len);
+            sms_rcv_msg[len] = 0;
+            if (strstr(sms_rcv_msg, "+CMTI:"))
+            {
+                log("match\n");
+                sim7000.sendCmd("AT+CMGL\r");
+            }
+            else if (strstr(sms_rcv_msg, "+CMGL"))
+            {
+                command = strstr(sms_rcv_msg, ">>>") + 3;
+                if (0 == strncmp(UNLOCK_MSG, command, strlen(UNLOCK_MSG)))
+                {
+                    log("unlock msg\n");
+                    app_events.got_sms_unlock = 1;
+                }
+                if (0 == strncmp(POSITION_MSG, command, strlen(POSITION_MSG)))
+                {
+                    app_events.got_sms_pos = 1;
+                    log("Position msg\n");
+                }
+                log(command);
+            }
+            log(sms_rcv_msg);
+        }
+        current_milis = previous_millis;
+    }
 }
 
 static void accel_handler(void)
@@ -314,13 +407,17 @@ static void ignition_sense_handler(void)
         if (state)
         {
             app_events.ignition_detected;
+            if (!lte_on) //TODO: Remove if you don't shutting down the lte
+                sim7000_init();
+            send_sms(TRIG_BY_IGNITION_MSG);
         }
         else
         {
             app_events.lock = true;
         }
 
-        ignition_event = false;
+        previous_millis = current_milis;
+        app_events.ignition_event = false;
     }
 }
 
@@ -333,6 +430,6 @@ static int ignition_sense_init(void)
 
 static void ignition_sense_cb(void)
 {
-    ignition_event = true;
+    app_events.ignition_event = true;
 }
 /* ============================================================================================== */
