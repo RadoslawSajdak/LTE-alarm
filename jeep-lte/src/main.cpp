@@ -247,13 +247,14 @@ static int sim7000_init(void)
 
 static int sim7000_send_position(void)
 {
-    char loc[17] = {0};
+    char loc[20] = {0};
     char url[sizeof(URL_HEADER) + sizeof(loc)] = {0};
     if (sim7000.getPosition())
     {
         //TODO: Any better format here
         memcpy(loc, sim7000.getLatitude(), 8);
-        memcpy(loc+7, sim7000.getLongitude(), 8);
+        loc[7] = ',';
+        memcpy(loc+8, sim7000.getLongitude(), 8);
         memcpy(url, URL_HEADER, sizeof(URL_HEADER));
         memcpy(url + sizeof(URL_HEADER) - 1, loc, sizeof(loc));
         send_sms(url);
