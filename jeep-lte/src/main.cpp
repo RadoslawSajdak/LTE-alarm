@@ -250,7 +250,7 @@ static int sim7000_send_position(void)
     {
         //TODO: Any better format here
         memcpy(loc, sim7000.getLatitude(), 8);
-        memcpy(loc+8, sim7000.getLongitude(), 8);
+        memcpy(loc+7, sim7000.getLongitude(), 8);
         send_sms(loc);
     }
     else
