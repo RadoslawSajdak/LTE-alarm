@@ -22,7 +22,7 @@
 /* ============================================================================================== */
 /*                                        DEFINES/TYPEDEFS                                        */
 #define LOGS_ENABLED                1
-#define TARGET_NUMBER               "+48664059986"
+#define TARGET_NUMBER               ""
 
 #define HELLO_MESSAGE               "JeepProtect just woke up!"
 #define TRIG_BY_ACCEL_MSG           "Jeep is moving!"
