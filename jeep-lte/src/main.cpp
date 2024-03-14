@@ -32,6 +32,8 @@
 #define POSITION_MSG                "position"
 #define LOCK_MSG                    "lock"
 
+#define URL_HEADER                  "https://www.google.com/maps/place/"
+
 #define PIN_TX                      7
 #define PIN_RX                      8
 #define ACCEL_INT_PIN               2
@@ -246,12 +248,15 @@ static int sim7000_init(void)
 static int sim7000_send_position(void)
 {
     char loc[17] = {0};
+    char url[sizeof(URL_HEADER) + sizeof(loc)] = {0};
     if (sim7000.getPosition())
     {
         //TODO: Any better format here
         memcpy(loc, sim7000.getLatitude(), 8);
         memcpy(loc+7, sim7000.getLongitude(), 8);
-        send_sms(loc);
+        memcpy(url, URL_HEADER, sizeof(URL_HEADER));
+        memcpy(url + sizeof(URL_HEADER) - 1, loc, sizeof(loc));
+        send_sms(url);
     }
     else
         send_sms(POS_UNAVAILABLE_MSG);
